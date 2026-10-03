@@ -1,0 +1,456 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>卖油翁 · 惟手熟尔</title>
+<style>
+  html,body{margin:0;min-height:100%;background:#22251f;display:flex;align-items:center;justify-content:center}
+  #wrap{position:relative;width:min(96vw,960px)}
+  canvas{width:100%;display:block;border-radius:6px;box-shadow:0 14px 50px rgba(0,0,0,.55);touch-action:none}
+</style>
+</head>
+<body>
+<div id="wrap"><canvas id="cv" width="960" height="540"></canvas></div>
+<script>
+"use strict";
+/* ============================================================
+   卖油翁 · 惟手熟尔 —— novel-to-mini-game-lite 示例构建
+   模板：点击解谜（时机判定）｜双幕：射箭十中八九 → 酌油钱孔不湿
+   验收：launch / render / input / coreLoop / outcome / restart
+   ============================================================ */
+const cv = document.getElementById('cv'), ctx = cv.getContext('2d');
+const W = 960, H = 540, GROUND = 460;
+const C = {paper:'#f2ecdd', ink1:'#8a9187', ink2:'#5c665e', ink3:'#3a4038',
+           pink:'#e8a0b4', red:'#b03a2e', warm:'#f0d9a8', gold:'#d9a53f', grey:'#7a7263'};
+const FONT = '"Kaiti SC","STKaiti","KaiTi","Songti SC","STSong","SimSun",serif';
+const f = s => ctx.font = s + 'px ' + FONT;
+const clamp = (v,a,b) => Math.max(a, Math.min(b, v));
+const lerp = (a,b,t) => a + (b-a)*t;
+const R = (a,b) => a + Math.random()*(b-a);
+
+let scene = 'title', tPrev = 0, time = 0;
+let clickZones = [], fade = 0, fadeDir = 0, fadeCb = null;
+const keys = {};
+let pointerHeld = false;
+
+/* ---------------- 状态 ---------------- */
+const stats = {shots:0, hits:0, center:0, pours:0, wets:0, hand:0};
+const range = {arrows:10, flying:null, stuck:[], nodT:0, retT:R(0,9), done:false};
+const oil = {fill:0, pour:false, hold:0, wetFlash:0, lock:0, drops:[], splash:[]};
+let popups = [];   // 评分浮字
+
+const dlg = {active:false, lines:[], i:0, chars:0, quote:'', onEnd:null};
+function say(lines, quote, onEnd){
+  dlg.active = true; dlg.lines = lines; dlg.i = 0; dlg.chars = 0;
+  dlg.quote = quote||''; dlg.onEnd = onEnd||null;
+}
+function advanceDlg(){
+  const cur = dlg.lines[dlg.i];
+  if (dlg.chars < cur.length){ dlg.chars = cur.length; return; }
+  if (dlg.i < dlg.lines.length-1){ dlg.i++; dlg.chars = 0; return; }
+  dlg.active = false;
+  const cb = dlg.onEnd; dlg.onEnd = null; if (cb) cb();
+}
+
+/* ---------------- 输入（指针统一鼠标/触屏） ---------------- */
+cv.addEventListener('pointerdown', ev => {
+  const r = cv.getBoundingClientRect();
+  const x = (ev.clientX-r.left)*W/r.width, y = (ev.clientY-r.top)*H/r.height;
+  for (const z of clickZones) if (x>=z.x&&x<=z.x+z.w&&y>=z.y&&y<=z.y+z.h){ z.fn(); return; }
+  if (dlg.active && !pressGate()) { advanceDlg(); return; }
+  if (scene==='range' && !dlg.active && !range.done) shoot();
+  if (scene==='oil') pointerHeld = true;
+});
+addEventListener('pointerup', () => pointerHeld = false);
+addEventListener('keydown', e => {
+  if (['ArrowLeft','ArrowRight',' ','e','E'].includes(e.key)) e.preventDefault();
+  keys[e.key] = true;
+  if (e.repeat) return;
+  if (scene==='title' && e.key===' ') return startGame();
+  if (dlg.active){ if (e.key===' '||e.key==='e'||e.key==='E'){ if(!pressGate()) advanceDlg(); } return; }
+  if (scene==='range' && (e.key===' '||e.key==='e'||e.key==='E') && !range.done) shoot();
+});
+addEventListener('keyup', e => keys[e.key] = false);
+function pressGate(){ return dlg.active && dlg.chars < dlg.lines[dlg.i].length; }
+
+const pouring = () => scene==='oil' && (pointerHeld || keys[' ']);
+
+/* ---------------- 通用绘制 ---------------- */
+function paperBG(top, bottom){
+  const g = ctx.createLinearGradient(0,0,0,H); g.addColorStop(0,top); g.addColorStop(1,bottom);
+  ctx.fillStyle = g; ctx.fillRect(0,0,W,H);
+}
+function hill(y, h, col){
+  ctx.fillStyle = col; ctx.beginPath();
+  ctx.moveTo(-60, y);
+  ctx.bezierCurveTo(W*.25, y-h, W*.45, y-h*.5, W*.55, y-h*1.02);
+  ctx.bezierCurveTo(W*.68, y-h*1.45, W*.85, y-h*.35, W+60, y);
+  ctx.lineTo(W+60,H); ctx.lineTo(-60,H); ctx.fill();
+}
+function person(x, gy, s, col, opts){
+  opts = opts||{};
+  ctx.fillStyle = col;
+  const nod = opts.nod ? Math.sin(opts.nod*9)*.12 : 0;      // 微颔：头部小幅点动
+  ctx.beginPath(); ctx.arc(x, gy-s*.78+(nod>0?nod*s:0), s*.16, 0, 7); ctx.fill();
+  ctx.beginPath();
+  ctx.moveTo(x-s*.15, gy); ctx.quadraticCurveTo(x-s*.2, gy-s*.5, x-s*.08, gy-s*.62);
+  ctx.lineTo(x+s*.08, gy-s*.62); ctx.quadraticCurveTo(x+s*.2, gy-s*.5, x+s*.15, gy); ctx.fill();
+  if (opts.hat){ ctx.beginPath(); ctx.moveTo(x-18, gy-s*.88); ctx.lineTo(x, gy-s*.96); ctx.lineTo(x+18, gy-s*.88); ctx.closePath(); ctx.fill(); }
+  if (opts.poleBandit){                                       // 卖油翁的担子
+    ctx.strokeStyle = col; ctx.lineWidth = 3;
+    ctx.beginPath(); ctx.moveTo(x-38, gy-46); ctx.quadraticCurveTo(x, gy-64, x+38, gy-46); ctx.stroke();
+    ctx.beginPath(); ctx.ellipse(x-38, gy-28, 12, 8, 0, 0, 7); ctx.fill();
+    ctx.beginPath(); ctx.ellipse(x+38, gy-28, 12, 8, 0, 0, 7); ctx.fill();
+    ctx.strokeStyle = col; ctx.lineWidth = 1.5;
+    ctx.beginPath(); ctx.moveTo(x-38, gy-36); ctx.lineTo(x-38, gy-20); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(x+38, gy-36); ctx.lineTo(x+38, gy-20); ctx.stroke();
+  }
+  if (opts.bow){                                              // 康肃的弓
+    ctx.strokeStyle = col; ctx.lineWidth = 3;
+    ctx.beginPath(); ctx.arc(x+34, gy-s*.42, 30, -1.2, 1.2); ctx.stroke();
+    ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(x+34+30*Math.cos(-1.2), gy-s*.42+30*Math.sin(-1.2));
+    ctx.lineTo(x+34+30*Math.cos(1.2), gy-s*.42+30*Math.sin(1.2)); ctx.stroke();
+  }
+}
+function stamp(txt, x, y, big){
+  ctx.save(); ctx.translate(x,y);
+  ctx.strokeStyle=C.red; ctx.lineWidth=2; ctx.globalAlpha=.85;
+  const w = big? 96:84;
+  ctx.strokeRect(-w/2,-16,w,32);
+  ctx.fillStyle=C.red; f(16); ctx.textAlign='center'; ctx.fillText(txt,0,6);
+  ctx.restore(); ctx.globalAlpha=1;
+}
+function hint(txt, sub){
+  ctx.fillStyle='rgba(58,64,56,.72)'; f(17); ctx.textAlign='center';
+  ctx.fillText(txt, W/2, H-34);
+  if (sub!==false){ ctx.fillStyle='rgba(58,64,56,.4)'; f(13); ctx.fillText(sub||'点击 / 空格 操作', W/2, H-12); }
+}
+function quoteFooter(txt){
+  ctx.fillStyle='rgba(122,114,99,.9)'; f(14); ctx.textAlign='left';
+  ctx.fillText(txt, 16, 24);
+}
+function drawDlg(){
+  if (!dlg.active) return;
+  const bw = 660, bh = 150, bx = (W-bw)/2, by = H-bh-42;
+  ctx.fillStyle = 'rgba(242,236,221,.97)'; ctx.strokeStyle = C.grey; ctx.lineWidth = 1.5;
+  ctx.fillRect(bx,by,bw,bh); ctx.strokeRect(bx,by,bw,bh);
+  ctx.strokeStyle = C.red; ctx.strokeRect(bx+5,by+5,bw-10,bh-10);
+  ctx.fillStyle = C.ink3; f(20); ctx.textAlign='left';
+  ctx.fillText(dlg.lines[dlg.i].slice(0, Math.floor(dlg.chars)), bx+24, by+46);
+  if (dlg.chars >= dlg.lines[dlg.i].length){
+    ctx.fillStyle = C.red; f(15); ctx.fillText('▸ 点击 / 空格 继续', bx+bw-170, by+bh-16);
+  }
+  if (dlg.quote){ ctx.fillStyle = C.grey; f(13); ctx.fillText('「'+dlg.quote+'」', bx+24, by+bh-16); }
+}
+function drawPopups(dt){
+  for (const p of popups){ p.y -= 26*dt; p.t += dt; }
+  popups = popups.filter(p=>p.t<1);
+  for (const p of popups){
+    ctx.globalAlpha = 1-p.t; ctx.fillStyle = p.col; f(p.big?24:18); ctx.textAlign='center';
+    ctx.fillText(p.txt, p.x, p.y); ctx.globalAlpha = 1;
+  }
+}
+function goto(name){ fadeDir = 1; fadeCb = () => { scene = name; SCENES[name].enter(); fadeDir = -1; }; }
+
+/* ---------------- 场景：标题 ---------------- */
+const SCENES = {};
+function startGame(){
+  if (scene!=='title') return;
+  stats.shots=0; stats.hits=0; stats.center=0; stats.pours=0; stats.wets=0; stats.hand=0;
+  range.arrows=10; range.flying=null; range.stuck=[]; range.done=false;
+  oil.fill=0; oil.pour=false; oil.hold=0; oil.wetFlash=0; oil.lock=0; oil.drops=[]; oil.splash=[];
+  popups=[]; goto('range');
+}
+SCENES.title = {
+  enter(){},
+  update(dt){},
+  draw(){
+    paperBG('#f4eede', '#e7dfc8');
+    hill(GROUND-20, 130, 'rgba(138,145,135,.42)');
+    ctx.fillStyle = '#aeb6a4'; ctx.fillRect(0, GROUND+36, W, H-GROUND-36);
+    // 家圃一角：靶与卖油翁剪影
+    drawTarget(720, GROUND-90, 70);
+    person(560, GROUND+30, 60, '#3a4038', {poleBandit:true});
+    f(58); ctx.textAlign='center'; ctx.fillStyle = C.ink3;
+    ctx.fillText('卖 油 翁', W/2, 120);
+    f(22); ctx.fillStyle = C.red; ctx.fillText('· 惟 手 熟 尔 ·', W/2, 162);
+    f(16); ctx.fillStyle = C.grey;
+    ctx.fillText('源起：欧阳修《卖油翁》｜ novel-to-mini-game-lite 示例', W/2, 196);
+    const bw=240,bh=52,bx=(W-bw)/2,by=452;
+    ctx.fillStyle='rgba(176,58,46,.12)'; ctx.fillRect(bx,by,bw,bh);
+    ctx.strokeStyle=C.red; ctx.lineWidth=2; ctx.strokeRect(bx,by,bw,bh);
+    ctx.fillStyle=C.red; f(21); ctx.fillText('入 圃 观 射', W/2, by+34);
+    clickZones.push({x:bx,y:by,w:bw,h:bh,fn:startGame});
+    f(14); ctx.fillStyle='rgba(58,64,56,.55)';
+    ctx.fillText('第一幕：点击放箭，射十矢 · 第二幕：按住斟油，钱孔不湿', W/2, by+bh+22);
+  }
+};
+
+/* ---------------- 靶 ---------------- */
+function drawTarget(x, y, r){
+  ctx.fillStyle = '#d8d0ba'; ctx.beginPath(); ctx.arc(x, y, r, 0, 7); ctx.fill();
+  ctx.strokeStyle = '#5c5346'; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.arc(x, y, r*.78, 0, 7); ctx.stroke();
+  ctx.beginPath(); ctx.arc(x, y, r*.42, 0, 7); ctx.stroke();
+  ctx.fillStyle = C.red; ctx.beginPath(); ctx.arc(x, y, r*.17, 0, 7); ctx.fill();
+  ctx.strokeStyle = '#4a4238'; ctx.lineWidth = 3;
+  ctx.beginPath(); ctx.moveTo(x, y+r); ctx.lineTo(x, GROUND+20); ctx.stroke();
+}
+
+/* ---------------- 幕一：射箭 ---------------- */
+const TX = 700, TY = 285;
+SCENES.range = {
+  enter(){
+    say(['陈康肃公善射，当世无双，公亦以此自矜。','尝射于家圃——请公放十矢。'],
+        '陈康肃公善射，当世无双');
+  },
+  update(dt){
+    range.retT += dt;
+    range.nodT = Math.max(0, range.nodT - dt);
+    if (range.flying){
+      range.flying.t += dt*4;
+      if (range.flying.t >= 1) landArrow();
+    }
+    // 微颔动画触发在 landArrow 里
+    stepDrops(dt);
+    drawSceneCommon(dt);
+  },
+  draw(){
+    paperBG('#f1ead6', '#e4dcc4');
+    hill(GROUND-30, 120, 'rgba(138,145,135,.4)');
+    ctx.fillStyle = '#cfc7ac'; ctx.fillRect(0, GROUND+16, W, H-GROUND-16);
+    drawTarget(TX, TY, 92);
+    // 已中的箭
+    for (const s of range.stuck){
+      ctx.strokeStyle = '#4a4238'; ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.moveTo(s.x-14, s.y+9); ctx.lineTo(s.x, s.y); ctx.stroke();
+      ctx.fillStyle = C.red; ctx.beginPath(); ctx.arc(s.x-14, s.y+9, 2.5, 0, 7); ctx.fill();
+    }
+    // 飞行中的箭
+    if (range.flying){
+      const t = Math.min(range.flying.t, 1);
+      const ax = lerp(300, range.flying.x, t), ay = lerp(340, range.flying.y, t) - Math.sin(t*3.14)*70;
+      const bx = lerp(300, range.flying.x, Math.min(1,t+.06)), by = lerp(340, range.flying.y, Math.min(1,t+.06)) - Math.sin(Math.min(1,t+.06)*3.14)*70;
+      ctx.strokeStyle = '#4a4238'; ctx.lineWidth = 2.5;
+      ctx.beginPath(); ctx.moveTo(ax, ay); ctx.lineTo(bx, by); ctx.stroke();
+    }
+    // 人物
+    person(240, GROUND+14, 62, '#33382f', {bow:true, hat:true});           // 康肃
+    person(430, GROUND+14, 56, '#3a4038', {poleBandit:true, nod:range.nodT}); // 卖油翁（睨之）
+    f(13); ctx.fillStyle = C.grey; ctx.textAlign='center';
+    ctx.fillText('陈尧咨', 240, GROUND-88);
+    ctx.fillText('卖油翁', 430, GROUND-92);
+    // 准星
+    if (!dlg.active && !range.flying && range.arrows>0){
+      const rx = TX + 80*Math.sin(1.35*range.retT), ry = TY + 64*Math.sin(1.85*range.retT+1.3);
+      ctx.strokeStyle = C.red; ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.arc(rx, ry, 9, 0, 7); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(rx-14, ry); ctx.lineTo(rx+14, ry); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(rx, ry-14); ctx.lineTo(rx, ry+14); ctx.stroke();
+    }
+    drawHud();
+    quoteFooter('「见其发矢十中八九，但微颔之。」');
+    if (!dlg.active && !range.done) hint(range.flying ? '……' : '点击 / 空格 放箭（余 '+range.arrows+' 矢）');
+    if (range.done && !dlg.active) hint('翁释担而立，睨之久而不去', false);
+    drawDlg();
+  }
+};
+function shoot(){
+  if (range.flying || range.arrows<=0) return;
+  const rx = TX + 80*Math.sin(1.35*range.retT), ry = TY + 64*Math.sin(1.85*range.retT+1.3);
+  range.flying = {x:rx, y:ry, t:0};
+  range.arrows--; stats.shots++;
+}
+function landArrow(){
+  const {x, y} = range.flying; range.flying = null;
+  range.stuck.push({x, y});
+  const d = Math.hypot(x-TX, y-TY);
+  let label, col;
+  if (d <= 22){ label='中'; col=C.red; stats.hits++; stats.center++; }
+  else if (d <= 54){ label='近'; col=C.ink3; stats.hits++; }
+  else if (d <= 86){ label='擦'; col=C.grey; }
+  else { label='脱'; col=C.grey; }
+  popups.push({txt:label, x, y:y-26, t:0, col, big:label==='中'});
+  range.nodT = 1.2;                                  // 但微颔之——恒定反应
+  if (range.arrows <= 0){
+    range.done = true;
+    setTimeout(() => {}, 0);
+    say(['公射毕——发矢十中'+stats.hits+'。翁但微颔之。',
+         '康肃问曰：「汝亦知射乎？吾射不亦精乎？」',
+         '翁曰：「无他，但手熟尔。」',
+         '康肃忿然曰：「尔安敢轻吾射！」',
+         '翁曰：「以我酌油知之。」'],
+        '无他，但手熟尔',
+        () => goto('oil'));
+  }
+}
+function drawHud(){
+  ctx.fillStyle = C.ink3; f(17); ctx.textAlign='left';
+  ctx.fillText('余矢 '+range.arrows+' · 中 '+stats.hits, 16, H-58);
+  if (stats.hand>0) stamp('手熟 Lv '+Math.min(stats.hand,5), 86, 70);
+}
+
+/* ---------------- 幕二：酌油 ---------------- */
+const OILX = 640, COINY = GROUND-64, LADLE = 640;   // 杓口正对葫芦口（钱孔正上方）
+const handAmp = () => Math.max(3, 13 - Math.min(stats.hand,5)*3);
+SCENES.oil = {
+  enter(){
+    say(['乃取一葫芦置于地，以钱覆其口。','翁曰：「以我酌油知之。」——请君执杓。'],
+        '以钱覆其口，徐以杓酌油');
+  },
+  update(dt){
+    oil.wetFlash = Math.max(0, oil.wetFlash - dt);
+    oil.lock = Math.max(0, oil.lock - dt);
+    const wantPour = pouring() && !dlg.active && oil.lock<=0 && oil.fill<100;
+    if (wantPour && !oil.pour){ oil.pour = true; oil.hold = 0; stats.pours++; }
+    if (!wantPour && oil.pour){ oil.pour = false; }
+    if (oil.pour){
+      oil.hold += dt;
+      const amp = handAmp() + Math.min(oil.hold, 1.6)*16;         // 按越久手越抖
+      const landX = LADLE + amp*Math.sin(time*6.5);
+      const dx = landX - OILX;
+      oil.drops.push({x:landX, y:COINY, ok:Math.abs(dx)<=12, edge:Math.abs(dx)>12&&Math.abs(dx)<=24});
+      if (Math.abs(dx) <= 12){
+        oil.fill = Math.min(100, oil.fill + 0.9 + (12-Math.abs(dx))/12);
+        if (oil.fill >= 100){
+          oil.pour = false;
+          say(['葫芦注满，钱竟不湿。',
+               '因曰：「我亦无他，惟手熟尔。」',
+               '康肃笑而遣之。'],
+              '自钱孔入，而钱不湿',
+              () => goto('end'));
+        }
+      } else if (Math.abs(dx) <= 24){
+        // 钱湿——翁徐徐重来
+        oil.pour = false; oil.wetFlash = 1.2; oil.lock = .8;
+        stats.wets++; stats.hand++;
+        oil.splash.push({x:landX, t:0});
+      } else {
+        oil.splash.push({x:landX, t:0, ground:true});
+      }
+    }
+    stepDrops(dt);
+    drawSceneCommon(dt);
+  },
+  draw(){
+    paperBG('#f2ecdd', '#e6dec8');
+    hill(GROUND-40, 95, 'rgba(138,145,135,.36)');
+    ctx.fillStyle = '#cfc7ac'; ctx.fillRect(0, GROUND+10, W, H-GROUND-10);
+    // 葫芦
+    const gTop = COINY+6, gh = 74;
+    ctx.fillStyle = '#8a9187';
+    ctx.beginPath(); ctx.ellipse(OILX, gTop+gh*.62, 34, gh*.4, 0, 0, 7); ctx.fill();
+    ctx.beginPath(); ctx.ellipse(OILX, gTop+gh*.18, 20, gh*.2, 0, 0, 7); ctx.fill();
+    // 注入的油
+    const fh = 46*(oil.fill/100);
+    if (fh>0){
+      ctx.fillStyle = C.gold;
+      ctx.beginPath(); ctx.ellipse(OILX, gTop+gh*.62+20-fh/2, 26, fh/1.6, 0, 0, 7); ctx.fill();
+    }
+    // 铜钱覆口
+    ctx.fillStyle = '#c9a44e';
+    ctx.beginPath(); ctx.ellipse(OILX, COINY, 30, 8, 0, 0, 7); ctx.fill();
+    ctx.strokeStyle = '#8f7430'; ctx.lineWidth = 1.5;
+    ctx.beginPath(); ctx.ellipse(OILX, COINY, 30, 8, 0, 0, 7); ctx.stroke();
+    ctx.fillStyle = '#f2ecdd';
+    ctx.fillRect(OILX-11, COINY-3.4, 22, 6.8);
+    if (oil.wetFlash>0){ ctx.fillStyle = 'rgba(176,58,46,'+oil.wetFlash*.5+')';
+      ctx.beginPath(); ctx.ellipse(OILX, COINY, 34, 10, 0, 0, 7); ctx.fill(); }
+    // 油担与翁执杓
+    person(250, GROUND+14, 60, '#3a4038', {poleBandit:true});
+    person(390, GROUND+14, 62, '#33382f', {hat:true});
+    ctx.strokeStyle = '#33382f'; ctx.lineWidth = 3;                      // 长柄杓（翁手至葫芦口上方）
+    ctx.beginPath(); ctx.moveTo(372, GROUND-18); ctx.lineTo(630, 172); ctx.stroke();
+    ctx.fillStyle = '#5c5346';
+    ctx.beginPath(); ctx.ellipse(LADLE, 164, 17, 10, 0, 0, 7); ctx.fill();
+    // 油流
+    if (oil.pour){
+      const amp = handAmp() + Math.min(oil.hold, 1.6)*16;
+      const landX = LADLE + amp*Math.sin(time*6.5);
+      ctx.strokeStyle = C.gold; ctx.lineWidth = 3;
+      ctx.beginPath(); ctx.moveTo(LADLE, 170);
+      ctx.quadraticCurveTo((LADLE+landX)/2, (170+COINY)/2, landX, COINY-4);
+      ctx.stroke();
+      if (Math.abs(landX-OILX)>12 && Math.abs(landX-OILX)<=24){
+        f(15); ctx.fillStyle = C.red; ctx.textAlign='center'; ctx.fillText('要湿！', landX, COINY-14);
+      }
+    }
+    // 溅油
+    for (const s of oil.splash){
+      s.t += .04;
+      ctx.globalAlpha = Math.max(0, 1-s.t);
+      ctx.strokeStyle = s.ground ? C.grey : C.gold; ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.arc(s.x, s.ground? GROUND+6 : COINY, 6+s.t*16, 0, 7); ctx.stroke();
+      ctx.globalAlpha = 1;
+    }
+    oil.splash = oil.splash.filter(s=>s.t<1);
+    drawHud();
+    f(16); ctx.fillStyle = C.grey; ctx.textAlign='center';
+    ctx.fillText('葫芦 '+Math.floor(oil.fill)+'%', OILX, gTop+gh+34);
+    quoteFooter('「徐以杓酌油沥之，自钱孔入，而钱不湿。」');
+    if (!dlg.active && oil.fill<100){
+      hint(oil.lock>0 ? '翁不愠，徐徐更酌……' : '按住斟油（徐以杓——点着倒更稳）');
+    }
+    drawDlg();
+  }
+};
+function stepDrops(dt){
+  for (const d of oil.drops) d.y += 900*dt;
+  oil.drops = oil.drops.filter(d=>d.y < GROUND+30);
+}
+
+/* ---------------- 结局 ---------------- */
+SCENES.end = {
+  enter(){},
+  update(dt){},
+  draw(){
+    paperBG('#f4eede', '#ece0cf');
+    hill(GROUND-40, 80, 'rgba(138,145,135,.3)');
+    person(300, GROUND+10, 60, '#3a4038', {poleBandit:true});
+    person(470, GROUND+10, 62, '#33382f', {hat:true});
+    f(15); ctx.fillStyle = C.grey; ctx.textAlign='center';
+    ctx.fillText('康肃笑而遣之', 385, GROUND-52);
+    f(34); ctx.fillStyle = C.red; ctx.fillText('惟 手 熟 尔', W/2, 108);
+    f(18); ctx.fillStyle = C.ink3;
+    const lines = [
+      '射者十中'+stats.hits+'，翁但微颔；',
+      '酌油钱孔，注满而不湿一钱。',
+      stats.center>=10 ? '翁亦只是微颔——神射亦无他。' : (stats.wets>0 ? '你湿过 '+stats.wets+' 次钱，第 '+(stats.wets+1)+' 只葫芦起，手就熟了。' : '钱竟不湿——你已替翁把话说完了。')
+    ];
+    for (let i=0;i<lines.length;i++) ctx.fillText(lines[i], W/2, 168+i*38);
+    const s = '行迹：中矢 '+stats.hits+'/10（红心 '+stats.center+'）· 沥油 '+stats.pours+' 注 · 钱湿 '+stats.wets+' 次 · 手熟 Lv '+Math.min(stats.hand,5);
+    f(16); ctx.fillStyle = C.grey; ctx.fillText(s, W/2, 342);
+    f(17); ctx.fillStyle = C.ink2; ctx.fillText('你所练熟的，何止是准头。', W/2, 384);
+    const bw=220,bh=52,bx=(W-bw)/2,by=430;
+    ctx.fillStyle='rgba(176,58,46,.1)'; ctx.fillRect(bx,by,bw,bh);
+    ctx.strokeStyle=C.red; ctx.lineWidth=2; ctx.strokeRect(bx,by,bw,bh);
+    ctx.fillStyle=C.red; f(20); ctx.fillText('重 返 家 圃', W/2, by+34);
+    clickZones.push({x:bx,y:by,w:bw,h:bh,fn:backToTitle});
+    quoteFooter('「我亦无他，惟手熟尔。」');
+  }
+};
+function backToTitle(){ goto('title'); }
+
+/* ---------------- 公共步进与主循环 ---------------- */
+function drawSceneCommon(){}
+function loop(ts){
+  const dt = Math.min(.05, (ts-tPrev)/1000 || 0); tPrev = ts; time += dt;
+  clickZones = [];
+  if (dlg.active && dlg.lines[dlg.i]) dlg.chars = Math.min(dlg.lines[dlg.i].length, dlg.chars + dt*26);
+  const S = SCENES[scene];
+  if (S){ S.update(dt); S.draw(); }
+  drawPopups(dt);
+  if (fadeDir !== 0){
+    fade += fadeDir*dt*3;
+    if (fade>=1 && fadeDir>0){ fade=1; const cb=fadeCb; fadeCb=null; if(cb) cb(); }
+    if (fade<=0 && fadeDir<0){ fade=0; fadeDir=0; }
+  }
+  if (fade>0){ ctx.fillStyle='rgba(28,30,26,'+clamp(fade,0,1)+')'; ctx.fillRect(0,0,W,H); }
+  requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>

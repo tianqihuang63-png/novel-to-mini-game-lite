@@ -58,6 +58,8 @@ npx skills add tianqihuang63-png/novel-to-mini-game-lite -g -y -a claude-code -s
 
 - [桃花源记：寻向所志](examples/taohuayuan/) —— 收集探索 + 双结局，26KB，
   附完整的「机制 ↔ 原文」对应表和三步文档样例。
+- [卖油翁：惟手熟尔](examples/maiyousheng/) —— 点击解谜双幕（射箭/酌油），
+  24KB，「手熟机制」让你在重试中亲身体验课文论点；工作区含真实的平衡调参自检记录。
 
 ## 合规
 
