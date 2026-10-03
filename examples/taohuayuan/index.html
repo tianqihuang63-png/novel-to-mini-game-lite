@@ -1,0 +1,575 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>桃花源记 · 寻向所志</title>
+<style>
+  html,body{margin:0;min-height:100%;background:#22251f;display:flex;align-items:center;justify-content:center}
+  #wrap{position:relative;width:min(96vw,960px)}
+  canvas{width:100%;display:block;border-radius:6px;box-shadow:0 14px 50px rgba(0,0,0,.55)}
+</style>
+</head>
+<body>
+<div id="wrap"><canvas id="cv" width="960" height="540"></canvas></div>
+<script>
+"use strict";
+/* ============================================================
+   桃花源记 · 寻向所志 —— NovelToGame 演示构建（playable-prototype）
+   六项验收：launch / render / input / coreLoop / outcome / restart
+   ============================================================ */
+const cv = document.getElementById('cv'), ctx = cv.getContext('2d');
+const W = 960, H = 540, GROUND = 452;
+const C = {paper:'#f2ecdd', ink1:'#8a9187', ink2:'#5c665e', ink3:'#3a4038',
+           pink:'#e8a0b4', pink2:'#f4c2ce', red:'#b03a2e', warm:'#f0d9a8', grey:'#7a7263'};
+const FONT = '"Kaiti SC","STKaiti","KaiTi","Songti SC","STSong","SimSun",serif';
+const f = s => ctx.font = s + 'px ' + FONT;
+const clamp = (v,a,b) => Math.max(a, Math.min(b, v));
+const lerp = (a,b,t) => a + (b-a)*t;
+const R = (a,b) => a + Math.random()*(b-a);
+
+/* ---------------- 全局状态 ---------------- */
+let scene = 'title', tPrev = 0, time = 0;
+const stats = {petals:0, days:0, ribbons:0, village:''};
+let flyers = [];
+let fade = 0, fadeDir = 0, fadeCb = null;
+let reveal = 0;
+let clickZones = [];
+const keys = {};
+
+addEventListener('keydown', e => {
+  if (['ArrowLeft','ArrowRight','a','d','A','D','e','E','x','X',' '].includes(e.key)) e.preventDefault();
+  keys[e.key] = true;
+  if (!e.repeat) press(e.key);
+});
+addEventListener('keyup', e => keys[e.key] = false);
+const left  = () => keys['ArrowLeft']||keys['a']||keys['A'];
+const right = () => keys['ArrowRight']||keys['d']||keys['D'];
+
+cv.addEventListener('click', ev => {
+  const r = cv.getBoundingClientRect();
+  const x = (ev.clientX-r.left)*W/r.width, y = (ev.clientY-r.top)*H/r.height;
+  for (const z of clickZones) if (x>=z.x&&x<=z.x+z.w&&y>=z.y&&y<=z.y+z.h) { z.fn(); return; }
+  if (dlg.active && !dlg.choices) advanceDlg();
+});
+
+/* ---------------- 对话系统 ---------------- */
+const dlg = {active:false, lines:[], i:0, chars:0, quote:'', choices:null, onEnd:null};
+function say(lines, quote, onEnd, choices){
+  dlg.active = true; dlg.lines = lines; dlg.i = 0; dlg.chars = 0;
+  dlg.quote = quote||''; dlg.onEnd = onEnd||null; dlg.choices = choices||null;
+}
+function advanceDlg(){
+  const cur = dlg.lines[dlg.i];
+  if (dlg.chars < cur.length) { dlg.chars = cur.length; return; }
+  if (dlg.i < dlg.lines.length-1) { dlg.i++; dlg.chars = 0; return; }
+  if (dlg.choices) return;
+  dlg.active = false;
+  const cb = dlg.onEnd; dlg.onEnd = null; if (cb) cb();
+}
+function press(k){
+  if (scene==='title' && (k===' '||k==='Enter')) return startGame();
+  if (dlg.active && !dlg.choices && (k===' '||k==='e'||k==='E')) return advanceDlg();
+  if (dlg.active) return;
+  const S = SCENES[scene];
+  if (S && S.press) S.press(k);
+}
+
+/* ---------------- 粒子：落花 ---------------- */
+let petalsBg = [];
+function seedPetals(n){
+  petalsBg = [];
+  for (let i=0;i<n;i++) petalsBg.push({x:R(0,W), y:R(-H,H), s:R(4,9), v:R(18,42), ph:R(0,6.3), vr:R(-1.4,1.4), a:R(.5,.95)});
+}
+function stepPetals(dt){
+  for (const p of petalsBg){
+    p.ph += dt; p.y += p.v*dt; p.x += Math.sin(p.ph)*22*dt; p.rot = p.ph*p.vr;
+    if (p.y > H+12){ p.y = -12; p.x = R(0,W); }
+  }
+}
+function drawAmbient(col){
+  for (const p of petalsBg) drawPetal(p.x, p.y, p.s, p.rot, p.a, col);
+}
+function drawPetal(x,y,s,rot,alpha,col){
+  ctx.save(); ctx.translate(x,y); ctx.rotate(rot); ctx.globalAlpha = alpha;
+  ctx.fillStyle = col||C.pink2;
+  ctx.beginPath(); ctx.ellipse(0,0,s,s*.55,0,0,7); ctx.fill();
+  ctx.restore(); ctx.globalAlpha = 1;
+}
+
+/* ---------------- 场景通用绘制 ---------------- */
+function paperBG(top, bottom){
+  const g = ctx.createLinearGradient(0,0,0,H); g.addColorStop(0,top); g.addColorStop(1,bottom);
+  ctx.fillStyle = g; ctx.fillRect(0,0,W,H);
+}
+function hill(y, h, col){
+  ctx.fillStyle = col; ctx.beginPath();
+  ctx.moveTo(-60, y);
+  ctx.bezierCurveTo(W*.22, y-h, W*.4, y-h*.55, W*.52, y-h*1.06);
+  ctx.bezierCurveTo(W*.66, y-h*1.5, W*.82, y-h*.4, W+60, y);
+  ctx.lineTo(W+60,H); ctx.lineTo(-60,H); ctx.fill();
+}
+function tree(x, gy, s, blossom){
+  ctx.strokeStyle = '#4a4238'; ctx.lineWidth = s*.12; ctx.lineCap='round';
+  ctx.beginPath(); ctx.moveTo(x, gy); ctx.quadraticCurveTo(x+s*.1, gy-s*.7, x-s*.08, gy-s*1.15); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(x-s*.04, gy-s*.75); ctx.lineTo(x+s*.3, gy-s*1.05); ctx.stroke();
+  const blobs = [[0,-1.35,.62],[-.42,-1.12,.45],[.4,-1.1,.48],[.05,-.95,.4]];
+  for (const b of blobs){
+    ctx.fillStyle = blossom ? (b[0]>0? C.pink : C.pink2) : '#6f7a5e';
+    ctx.beginPath(); ctx.ellipse(x+b[0]*s, gy+b[1]*s, b[2]*s, b[2]*s*.8, 0, 0, 7); ctx.fill();
+  }
+}
+function house(x, gy, s){
+  ctx.fillStyle = '#d8d0ba'; ctx.fillRect(x-s*.5, gy-s*.9, s, s*.55);
+  ctx.fillStyle = '#4a4238'; ctx.beginPath();
+  ctx.moveTo(x-s*.62, gy-s*.85); ctx.lineTo(x, gy-s*1.3); ctx.lineTo(x+s*.62, gy-s*.85); ctx.closePath(); ctx.fill();
+  ctx.fillStyle = '#5c5346'; ctx.fillRect(x-s*.1, gy-s*.62, s*.2, s*.27);
+}
+function person(x, gy, s, col, kind){
+  ctx.fillStyle = col;
+  ctx.beginPath(); ctx.arc(x, gy-s*.78, s*.16, 0, 7); ctx.fill();
+  ctx.beginPath();
+  ctx.moveTo(x-s*.15, gy); ctx.quadraticCurveTo(x-s*.2, gy-s*.5, x-s*.08, gy-s*.62);
+  ctx.lineTo(x+s*.08, gy-s*.62); ctx.quadraticCurveTo(x+s*.2, gy-s*.5, x+s*.15, gy); ctx.fill();
+  if (kind==='elder') ctx.fillRect(x-s*.22, gy-s*1.0, s*.44, s*.05);
+  if (kind==='child'){ ctx.beginPath(); ctx.arc(x, gy-s*.9, s*.1, 0, 7); ctx.fill(); }
+  if (kind==='host') ctx.fillRect(x-s*.2, gy-s*.4, s*.4, s*.06);
+}
+const hero = {x:120, bob:0};
+function drawHero(gy){
+  const bob = Math.sin(hero.bob*9)*2;
+  person(hero.x, gy+bob, 46, '#33382f');
+  ctx.fillStyle = '#33382f';
+  ctx.beginPath(); ctx.moveTo(hero.x-20, gy+bob-44); ctx.lineTo(hero.x, gy+bob-52); ctx.lineTo(hero.x+20, gy+bob-44); ctx.closePath(); ctx.fill();
+}
+function ribbon(x, gy){
+  ctx.strokeStyle='#4a4238'; ctx.lineWidth=2; ctx.beginPath(); ctx.moveTo(x,gy); ctx.lineTo(x,gy-26); ctx.stroke();
+  const wv = Math.sin(time*4+x)*3;
+  ctx.fillStyle = C.pink; ctx.beginPath();
+  ctx.moveTo(x,gy-26); ctx.quadraticCurveTo(x+10+wv, gy-24, x+16+wv, gy-20); ctx.lineTo(x+2, gy-16); ctx.closePath(); ctx.fill();
+}
+function stamp(txt, x, y){
+  ctx.save(); ctx.translate(x,y);
+  ctx.strokeStyle=C.red; ctx.lineWidth=2; ctx.globalAlpha=.85;
+  ctx.strokeRect(-40,-16,80,32);
+  ctx.fillStyle=C.red; f(16); ctx.textAlign='center'; ctx.fillText(txt,0,6);
+  ctx.restore(); ctx.globalAlpha=1;
+}
+function hint(txt){
+  ctx.fillStyle='rgba(58,64,56,.72)'; f(17); ctx.textAlign='center';
+  ctx.fillText(txt, W/2, H-30);
+  ctx.fillStyle='rgba(58,64,56,.4)'; f(13);
+  ctx.fillText('← → 移动 · E 交互 · X 标记', W/2, H-10);
+}
+function quoteFooter(txt){
+  ctx.fillStyle='rgba(122,114,99,.9)'; f(14); ctx.textAlign='left';
+  ctx.fillText(txt, 16, 22);
+}
+function near(x){ return Math.abs(hero.x - x) < 52; }
+
+/* ---------------- 对话框 ---------------- */
+function drawDlg(){
+  if (!dlg.active) return;
+  const bw = 640, bh = 150, bx = (W-bw)/2, by = H-bh-46;
+  ctx.fillStyle = 'rgba(242,236,221,.97)'; ctx.strokeStyle = C.grey; ctx.lineWidth = 1.5;
+  ctx.fillRect(bx,by,bw,bh); ctx.strokeRect(bx,by,bw,bh);
+  ctx.strokeStyle = C.red; ctx.strokeRect(bx+5,by+5,bw-10,bh-10);
+  ctx.fillStyle = C.ink3; f(20); ctx.textAlign='left';
+  const cur = dlg.lines[dlg.i].slice(0, Math.floor(dlg.chars));
+  ctx.fillText(cur, bx+24, by+46);
+  const full = dlg.chars >= dlg.lines[dlg.i].length;
+  if (full && !dlg.choices){
+    ctx.fillStyle = C.red; f(15); ctx.fillText('▸ 点击 / 空格 继续', bx+bw-170, by+bh-16);
+  }
+  if (dlg.quote){ ctx.fillStyle = C.grey; f(13); ctx.fillText('「'+dlg.quote+'」', bx+24, by+bh-16); }
+  if (full && dlg.choices){
+    for (let i=0;i<dlg.choices.length;i++){
+      const cw=250, chh=48, cx=bx+58+i*(cw+24), cy=by-64;
+      ctx.fillStyle = i===0? 'rgba(232,160,180,.3)':'rgba(242,236,221,1)';
+      ctx.fillRect(cx,cy,cw,chh);
+      ctx.strokeStyle=C.red; ctx.lineWidth=2; ctx.strokeRect(cx,cy,cw,chh);
+      ctx.fillStyle=C.ink3; f(19); ctx.textAlign='center';
+      ctx.fillText(dlg.choices[i].label, cx+cw/2, cy+31);
+      clickZones.push({x:cx,y:cy,w:cw,h:chh,fn:dlg.choices[i].fn});
+    }
+  }
+}
+
+/* ---------------- HUD ---------------- */
+function drawHudBar(){
+  drawPetal(W-122, 32, 9, .4, 1, C.pink);
+  ctx.fillStyle = C.ink3; f(18); ctx.textAlign='left';
+  ctx.fillText('落英 '+stats.petals+'/5', W-104, 38);
+  if (stats.days>0) stamp('居 '+stats.days+' 日', 70, 32);
+  if (stats.ribbons>0 && scene==='return'){
+    ctx.fillStyle=C.pink; f(18); ctx.fillText('丝带 ×'+stats.ribbons, 16, 46);
+  }
+}
+
+/* ---------------- 转场 ---------------- */
+function goto(name){
+  fadeDir = 1;
+  fadeCb = () => { scene = name; SCENES[name].enter(); fadeDir = -1; };
+}
+
+/* ---------------- 场景 ---------------- */
+const SCENES = {};
+let grovePetals = [], caveProg = 0, villagerDone = {}, exitReady = false;
+const GATE_X = 880, TAISHOU_X = 885;
+
+function startGame(){
+  if (scene!=='title') return;
+  stats.petals=0; stats.days=0; stats.ribbons=0; stats.village='';
+  flyers=[]; grovePetals=[]; caveProg=0; villagerDone={}; exitReady=false; reveal=0;
+  goto('stream');
+}
+
+SCENES.title = {
+  enter(){ seedPetals(55); },
+  press(){},
+  update(dt){ stepPetals(dt); },
+  draw(){
+    paperBG('#f4eede', '#e7dfc8');
+    hill(GROUND-30, 150, 'rgba(138,145,135,.45)');
+    hill(GROUND+10, 90, 'rgba(92,102,94,.55)');
+    ctx.fillStyle = '#aeb6a4'; ctx.fillRect(0, GROUND+40, W, H-GROUND-40);
+    drawAmbient();
+    tree(170, GROUND+50, 120, true); tree(780, GROUND+55, 140, true);
+    const t = '桃花源记';
+    f(62); ctx.textAlign='center'; ctx.fillStyle = C.ink3;
+    for (let i=0;i<t.length;i++) ctx.fillText(t[i], W/2, 100+i*70);
+    f(21); ctx.fillStyle = C.red; ctx.fillText('· 寻 向 所 志 ·', W/2, 100+4*70+4);
+    f(16); ctx.fillStyle = C.grey;
+    ctx.fillText('源起：陶渊明《桃花源记》｜ NovelToGame 技能演示构建', W/2, 428);
+    const bw=220,bh=52,bx=(W-bw)/2,by=462;
+    ctx.fillStyle='rgba(176,58,46,.12)'; ctx.fillRect(bx,by,bw,bh);
+    ctx.strokeStyle=C.red; ctx.lineWidth=2; ctx.strokeRect(bx,by,bw,bh);
+    ctx.fillStyle=C.red; f(22); ctx.textAlign='center'; ctx.fillText('入 山 寻 源', W/2, by+34);
+    clickZones.push({x:bx,y:by,w:bw,h:bh,fn:startGame});
+    f(14); ctx.fillStyle='rgba(58,64,56,.55)';
+    ctx.fillText('点击按钮或按空格开始', W/2, by+bh+22);
+  }
+};
+
+/* ---- 场景 1：缘溪行 · 忽逢桃花林 ---- */
+SCENES.stream = {
+  enter(){
+    hero.x = 90;
+    grovePetals = [[250,430],[400,415],[540,435],[660,420],[760,428]].map(([x,y])=>({x,y,got:false}));
+    seedPetals(46);
+    say(['晋太元中，武陵人捕鱼为业。','这一日，我照旧缘溪行船，不知不觉，忘了路的远近。'],
+        '晋太元中，武陵人捕鱼为业');
+  },
+  press(k){ if ((k==='e'||k==='E') && stats.petals>=5 && near(GATE_X-40)) goto('cave'); },
+  update(dt){
+    hero.bob += dt*((left()||right())?1:.2);
+    hero.x = clamp(hero.x + (right()?150*dt:0) - (left()?150*dt:0), 40, GATE_X-40);
+    for (const p of grovePetals){
+      if (!p.got && Math.abs(hero.x-p.x)<30){ p.got = true; flyers.push({x:p.x, y:p.y-20, t:0, counted:false}); }
+    }
+    for (const fl of flyers){ fl.t += dt*2.2; if (fl.t>=1 && !fl.counted){ fl.counted=true; stats.petals++; } }
+    flyers = flyers.filter(fl=>fl.t<1.05);
+    stepPetals(dt);
+  },
+  draw(){
+    paperBG('#efe7d2', '#e3dcc4');
+    hill(GROUND-10, 120, 'rgba(138,145,135,.4)');
+    hill(GROUND+26, 70, 'rgba(92,102,94,.5)');
+    ctx.fillStyle = '#aebfc0'; ctx.beginPath();
+    ctx.moveTo(0, GROUND+58);
+    for (let x=0;x<=W;x+=40) ctx.lineTo(x, GROUND+58 + Math.sin(x*.02+time*1.6)*5);
+    ctx.lineTo(W,H); ctx.lineTo(0,H); ctx.fill();
+    ctx.strokeStyle='rgba(255,255,255,.5)'; ctx.lineWidth=2;
+    for (let i=0;i<4;i++){ ctx.beginPath();
+      for (let x=40+i*30;x<W;x+=160){ ctx.moveTo(x,GROUND+86+i*16+Math.sin(x*.05+time)*3); ctx.lineTo(x+36,GROUND+86+i*16+Math.sin(x*.05+time)*3);} ctx.stroke(); }
+    ctx.fillStyle = '#cfc7ac'; ctx.fillRect(0, GROUND+28, W, 34);
+    for (let i=0;i<7;i++) tree(140+i*118 - (i%2)*36, GROUND+36, 74+((i*37)%40), true);
+    drawAmbient();
+    for (const p of grovePetals) if (!p.got){
+      const gl = .6+.4*Math.sin(time*3+p.x);
+      drawPetal(p.x, p.y, 11, .3+(p.x%1), gl, C.pink);
+    }
+    const lit = stats.petals>=5;
+    ctx.fillStyle = lit? C.ink3 : 'rgba(90,96,88,.75)';
+    ctx.fillRect(W-30, 0, 60, H);
+    ctx.fillStyle = C.ink2; ctx.beginPath();
+    ctx.moveTo(GATE_X-56, H); ctx.quadraticCurveTo(GATE_X-70, 300, GATE_X-30, 180);
+    ctx.lineTo(GATE_X+20, 180); ctx.quadraticCurveTo(GATE_X+6, 320, GATE_X+22, H); ctx.closePath(); ctx.fill();
+    if (lit){
+      const g = ctx.createRadialGradient(GATE_X-4, 300, 2, GATE_X-4, 300, 60);
+      g.addColorStop(0,'rgba(240,217,168,.95)'); g.addColorStop(1,'rgba(240,217,168,0)');
+      ctx.fillStyle = g; ctx.beginPath(); ctx.arc(GATE_X-4, 300, 60, 0, 7); ctx.fill();
+    }
+    drawHero(GROUND+4);
+    for (const fl of flyers){
+      const t = Math.min(fl.t,1);
+      drawPetal(lerp(fl.x,W-116,t), lerp(fl.y-20,32,t)-Math.sin(t*3.14)*40, 8, t*4, 1, C.pink);
+    }
+    drawHudBar();
+    quoteFooter('「忽逢桃花林，夹岸数百步，中无杂树，芳草鲜美，落英缤纷。」');
+    if (!dlg.active) hint(stats.petals<5 ? '拾起地上的落英（走近自动拾取）' : '前方山口仿佛有光（→ 走到山口，按 E 进入）');
+    drawDlg();
+  }
+};
+
+/* ---- 场景 2：山口狭道 → 豁然开朗 ---- */
+SCENES.cave = {
+  enter(){ caveProg = 0; reveal = 0; },
+  press(){},
+  update(dt){
+    if (reveal>0){
+      reveal += dt*1.1;
+      if (reveal>=1 && scene==='cave'){ scene='village'; SCENES.village.enter(); }
+      return;
+    }
+    if (right()||left()) caveProg = Math.min(1, caveProg + dt/6);
+    if (caveProg>=1) reveal = .0001;
+  },
+  draw(){
+    paperBG('#262b25', '#1d211c');
+    const half = lerp(340, 60, caveProg);
+    ctx.fillStyle = '#151813';
+    ctx.beginPath(); ctx.moveTo(0,0); ctx.lineTo(W,0); ctx.lineTo(W/2+half,0);
+    ctx.bezierCurveTo(W/2+half*.5, H*.35, W/2+half*.7, H*.7, W/2+half, H); ctx.lineTo(W,H); ctx.closePath(); ctx.fill();
+    ctx.beginPath(); ctx.moveTo(0,H); ctx.lineTo(W,H); ctx.lineTo(W/2-half,H);
+    ctx.bezierCurveTo(W/2-half*.7, H*.7, W/2-half*.5, H*.35, W/2-half, 0); ctx.lineTo(0,0); ctx.closePath(); ctx.fill();
+    const lx = W/2, ly = H*.42;
+    const g = ctx.createRadialGradient(lx,ly,2, lx,ly, lerp(18,120,caveProg));
+    g.addColorStop(0,'rgba(240,217,168,.95)'); g.addColorStop(1,'rgba(240,217,168,0)');
+    ctx.fillStyle = g; ctx.beginPath(); ctx.arc(lx,ly, lerp(18,120,caveProg), 0, 7); ctx.fill();
+    person(W/2 - half*.3 + Math.sin(time*6)*1.5, H*.86, 40, '#0e100d');
+    quoteFooter('「初极狭，才通人。复行数十步——」');
+    if (reveal<=0){
+      hint('岩缝仅容一人（按住 → 侧行而进）');
+      ctx.strokeStyle='rgba(240,217,168,.5)'; ctx.lineWidth=3;
+      ctx.beginPath(); ctx.moveTo(W/2-90,H-64); ctx.lineTo(W/2+90,H-64); ctx.stroke();
+      ctx.strokeStyle=C.warm; ctx.beginPath(); ctx.moveTo(W/2-90,H-64); ctx.lineTo(W/2-90+180*caveProg,H-64); ctx.stroke();
+    }
+    if (reveal>0){
+      const t = Math.min(reveal,1);
+      ctx.fillStyle = 'rgba(244,236,221,'+(t*.95)+')';
+      ctx.beginPath(); ctx.arc(lx,ly, t*1500, 0, 7); ctx.fill();
+      if (t>.55){
+        ctx.globalAlpha = (t-.55)/.45;
+        paperBG('#f2ecdd','#e9e2cf');
+        hill(GROUND-20, 130, 'rgba(138,145,135,.4)');
+        ctx.globalAlpha = 1;
+        f(30); ctx.fillStyle=C.ink3; ctx.textAlign='center';
+        ctx.globalAlpha = (t-.55)/.45;
+        ctx.fillText('豁 然 开 朗', W/2, H/2);
+        ctx.globalAlpha = 1;
+      }
+    }
+  }
+};
+
+/* ---- 场景 3：桃源村 ---- */
+const NPCS = [
+  {x:270, kind:'child', name:'垂髫小儿',
+   lines:['客人是从溪那边来的吗？','溪边的桃花落起来像下雨，我接不到！'],
+   quote:'黄发垂髫，并怡然自乐'},
+  {x:520, kind:'elder', name:'黄发老人',
+   lines:['自先世避秦时乱，率妻子邑人来此绝境。','不复出焉，遂与外人间隔。'],
+   quote:'自云先世避秦时乱……不复出焉'},
+  {x:715, kind:'host', name:'设食村人', lines:[], quote:'便要还家，设酒杀鸡作食'}
+];
+SCENES.village = {
+  enter(){ hero.x = 120; seedPetals(14); if (stats.days===0) stats.days = 1; },
+  press(k){
+    if (k!=='e' && k!=='E') return;
+    for (const n of NPCS){
+      if (near(n.x) && !villagerDone[n.name]){ talk(n); return; }
+    }
+    if (exitReady && hero.x > 840) goto('return');
+  },
+  update(dt){
+    hero.bob += dt*((left()||right())?1:.2);
+    hero.x = clamp(hero.x + (right()?170*dt:0) - (left()?170*dt:0), 50, 880);
+    stepPetals(dt);
+  },
+  draw(){
+    paperBG('#f4eede', '#ece4cf');
+    hill(GROUND-36, 90, 'rgba(138,145,135,.38)');
+    drawAmbient();
+    ctx.fillStyle = '#b9c29a'; ctx.fillRect(0, GROUND+30, W, 60);
+    ctx.strokeStyle = 'rgba(96,110,74,.6)'; ctx.lineWidth = 1.5;
+    for (let i=0;i<12;i++){ ctx.beginPath(); ctx.moveTo(20+i*80, GROUND+34); ctx.lineTo(50+i*80, GROUND+86); ctx.stroke(); }
+    for (let i=0;i<6;i++) tree(90+i*160, GROUND+40, 60+((i*53)%30), false);
+    house(330, GROUND+18, 66); house(600, GROUND+16, 58); house(840, GROUND+20, 62);
+    ctx.strokeStyle='rgba(58,64,56,.5)'; ctx.lineWidth=1.5;
+    ctx.beginPath(); ctx.moveTo(430,GROUND+72); ctx.lineTo(430,GROUND+62); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(700,GROUND+80); ctx.lineTo(706,GROUND+70); ctx.stroke();
+    ctx.fillStyle = 'rgba(58,64,56,.5)';
+    ctx.beginPath(); ctx.arc(430, GROUND+74, 4, 0, 7); ctx.fill();
+    ctx.beginPath(); ctx.arc(706, GROUND+82, 5, 0, 7); ctx.fill();
+    ctx.strokeStyle='rgba(122,114,99,.5)'; ctx.lineWidth=3;
+    for (const hx of [330,600,840]){
+      ctx.beginPath(); ctx.moveTo(hx, GROUND-60);
+      ctx.quadraticCurveTo(hx+8+Math.sin(time+hx)*6, GROUND-95, hx+2, GROUND-130); ctx.stroke();
+    }
+    for (const n of NPCS){
+      person(n.x, GROUND+22, 46, villagerDone[n.name]? 'rgba(58,64,56,.45)':'#3a4038', n.kind);
+      if (!dlg.active && !villagerDone[n.name] && near(n.x)){
+        f(15); ctx.fillStyle=C.red; ctx.textAlign='center';
+        ctx.fillText('按 E 与「'+n.name+'」交谈', n.x, GROUND-40);
+      }
+    }
+    drawHero(GROUND+26);
+    drawHudBar();
+    quoteFooter('「土地平旷，屋舍俨然，有良田、美池、桑竹之属。阡陌交通，鸡犬相闻。」');
+    if (!dlg.active){
+      const left3 = NPCS.filter(n=>!villagerDone[n.name]).length;
+      if (left3>0) hint('走访村人（还剩 '+left3+' 位）· 每叙一处，居留一日');
+      else if (hero.x<=840) hint('居数日，辞去——向东行至村口');
+      else hint('按 E 辞行');
+    }
+    drawDlg();
+  }
+};
+function talk(n){
+  if (n.kind!=='host'){
+    say(n.lines, n.quote, () => { villagerDone[n.name]=true; stats.days++; checkExit(); });
+  } else {
+    say(['客人远来，先满饮此杯。','敢问客人——如今山外，是何世道？'], n.quote, null, [
+      {label:'一一具言所闻', fn(){
+        dlg.active=false;
+        say(['（你把汉、魏、晋的更迭，一一道来。）','「竟已过了这么多朝代……」村人皆叹惋。'],
+            '此人一一为具言所闻，皆叹惋',
+            ()=>{ villagerDone[n.name]=true; stats.days++; stats.village='具言'; checkExit(); });
+      }},
+      {label:'笑而不答', fn(){
+        dlg.active=false;
+        say(['（你举杯，只道山中岁月好。）','「客人不愿说也罢。且再饮一杯。」'],
+            '问今是何世，乃不知有汉',
+            ()=>{ villagerDone[n.name]=true; stats.days++; stats.village='不答'; checkExit(); });
+      }}
+    ]);
+  }
+}
+function checkExit(){ if (Object.keys(villagerDone).length>=3) exitReady = true; }
+
+/* ---- 场景 4：辞去 · 处处志之 ---- */
+SCENES.return = {
+  enter(){ hero.x = 90; seedPetals(10); },
+  press(k){
+    if ((k==='x'||k==='X') && stats.ribbons<8) stats.ribbons++;
+    if ((k==='e'||k==='E') && near(TAISHOU_X-40)) goto('choice');
+  },
+  update(dt){
+    hero.bob += dt*((left()||right())?1:.2);
+    hero.x = clamp(hero.x + (right()?160*dt:0) - (left()?160*dt:0), 50, TAISHOU_X-40);
+    stepPetals(dt);
+  },
+  draw(){
+    paperBG('#efe8d6', '#e2dbc6');
+    hill(GROUND-16, 105, 'rgba(138,145,135,.42)');
+    hill(GROUND+22, 62, 'rgba(92,102,94,.5)');
+    drawAmbient('#e0d5c2');
+    ctx.fillStyle = '#aebfc0'; ctx.fillRect(0, GROUND+56, W, H-GROUND-56);
+    ctx.fillStyle = '#cfc7ac'; ctx.fillRect(0, GROUND+26, W, 34);
+    for (let i=0;i<5;i++) tree(200+i*150, GROUND+30, 62, true);
+    for (let i=0;i<stats.ribbons;i++) ribbon(150+i*90, GROUND+30);
+    house(TAISHOU_X, GROUND+10, 90);
+    f(17); ctx.fillStyle=C.red; ctx.textAlign='center'; ctx.fillText('太 守 府', TAISHOU_X, GROUND-76);
+    drawHero(GROUND+2);
+    drawHudBar();
+    quoteFooter('「既出，得其船，便扶向路，处处志之。」');
+    if (!dlg.active) hint(stats.ribbons===0 ? '沿途按 X 系丝带作记号（处处志之）' : '已系 '+stats.ribbons+' 处丝带 · 向右至太守府（按 E 入府）');
+    drawDlg();
+  }
+};
+
+/* ---- 场景 5：终局抉择 ---- */
+SCENES.choice = {
+  enter(){},
+  press(){},
+  update(dt){},
+  draw(){
+    paperBG('#f2ecdd', '#e7dfc8');
+    hill(GROUND-40, 80, 'rgba(138,145,135,.3)');
+    f(30); ctx.fillStyle=C.ink3; ctx.textAlign='center';
+    ctx.fillText('太 守 曰 ：「 有 此 事 ？ 」', W/2, 126);
+    f(19); ctx.fillStyle=C.grey;
+    ctx.fillText('你想起临别时那句嘱托——', W/2, 176);
+    f(22); ctx.fillStyle=C.ink2; ctx.fillText('「不足为外人道也。」', W/2, 212);
+    const opts = [
+      {label:'诣太守，说如此', sub:'如实相告（原著之路）', fn(){ stats.village = stats.village||'具言'; goto('endTold'); }},
+      {label:'守口，不复言', sub:'不足为外人道也', fn(){ stats.village = stats.village||'不答'; goto('endKept'); }}
+    ];
+    for (let i=0;i<2;i++){
+      const cw=300, ch=110, cx=W/2-330+i*360, cy=280;
+      ctx.fillStyle='rgba(242,236,221,1)'; ctx.fillRect(cx,cy,cw,ch);
+      ctx.strokeStyle = i===0? C.grey : C.red; ctx.lineWidth=2.5; ctx.strokeRect(cx,cy,cw,ch);
+      ctx.strokeStyle = i===0? 'rgba(122,114,99,.35)':'rgba(176,58,46,.35)';
+      ctx.lineWidth = 2.5+1.5*Math.sin(time*2.5);
+      ctx.strokeRect(cx-6,cy-6,cw+12,ch+12);
+      ctx.fillStyle=C.ink3; f(24); ctx.fillText(opts[i].label, cx+cw/2, cy+48);
+      ctx.fillStyle=C.grey; f(16); ctx.fillText(opts[i].sub, cx+cw/2, cy+80);
+      clickZones.push({x:cx,y:cy,w:cw,h:ch,fn:opts[i].fn});
+    }
+    quoteFooter('「此中人语云：不足为外人道也。」');
+    f(15); ctx.fillStyle='rgba(58,64,56,.5)'; ctx.textAlign='center';
+    ctx.fillText('此抉择不可逆，将决定桃花源的命运', W/2, 468);
+  }
+};
+
+/* ---- 结局 ---- */
+function drawEnding(kept){
+  if (kept){ paperBG('#f6efdc', '#f0dfe0'); } else { paperBG('#efece3', '#e2e0d8'); }
+  const petalN = kept? petalsBg.length : Math.min(3, petalsBg.length);
+  for (let i=0;i<petalN;i++){
+    const p = petalsBg[i % petalsBg.length];
+    if (p) drawPetal(p.x,p.y,p.s,p.rot,p.a, kept? C.pink2 : '#d8d5c8');
+  }
+  f(26); ctx.fillStyle = kept? C.pink : C.grey; ctx.textAlign='center';
+  ctx.fillText(kept? '结 局 · 桃 源 长 存' : '结 局 · 后 遂 无 问 津 者', W/2, 92);
+  const lines = kept ? [
+    '你归家后不复言。',
+    '桃源仍在——良田照旧耕种，落英照旧缤纷。',
+    '只是从此世上，再没有人找得到它。',
+    '',
+    '「不足为外人道也。」'
+  ] : [
+    '太守即遣人随其往，寻向所志。',
+    '丝带仍在风中，路却已不在——遂迷，不复得路。',
+    stats.village==='不答' ? '你始终没能说出村中光景，如今想说，也无处可寻了。' : '你想起村人叹惋的回声，仿佛仍在耳边。',
+    '南阳刘子骥，高尚士也，闻之，欣然规往。未果，寻病终。',
+    '后遂无问津者。'
+  ];
+  for (let i=0;i<lines.length;i++){
+    f(i===lines.length-1?21:18);
+    ctx.fillStyle = i===lines.length-1 ? (kept? C.red : C.grey) : C.ink3;
+    ctx.fillText(lines[i], W/2, 142+i*40);
+  }
+  const s = '行迹：拾落英 '+stats.petals+' 片 · 居 '+stats.days+' 日 · 系丝带 '+stats.ribbons+' 处 · 村中'+(stats.village||'未言');
+  f(16); ctx.fillStyle = C.grey; ctx.fillText(s, W/2, 392);
+  const bw=220,bh=52,bx=(W-bw)/2,by=436;
+  ctx.fillStyle='rgba(176,58,46,.1)'; ctx.fillRect(bx,by,bw,bh);
+  ctx.strokeStyle=C.red; ctx.lineWidth=2; ctx.strokeRect(bx,by,bw,bh);
+  ctx.fillStyle=C.red; f(21); ctx.fillText('重 返 武 陵', W/2, by+34);
+  clickZones.push({x:bx,y:by,w:bw,h:bh,fn:backToTitle});
+}
+SCENES.endTold = { enter(){ seedPetals(10); }, press(){}, update(dt){ stepPetals(dt); }, draw(){ drawEnding(false); } };
+SCENES.endKept = { enter(){ seedPetals(48); }, press(){}, update(dt){ stepPetals(dt); }, draw(){ drawEnding(true); } };
+function backToTitle(){ stats.petals=0; stats.days=0; stats.ribbons=0; stats.village=''; goto('title'); }
+
+/* ---------------- 主循环 ---------------- */
+function loop(ts){
+  const dt = Math.min(.05, (ts-tPrev)/1000 || 0); tPrev = ts; time += dt;
+  clickZones = [];
+  if (dlg.active && dlg.lines[dlg.i]) dlg.chars = Math.min(dlg.lines[dlg.i].length, dlg.chars + dt*24);
+  const S = SCENES[scene];
+  if (S){ S.update(dt); S.draw(); }
+  if (fadeDir !== 0){
+    fade += fadeDir*dt*3;
+    if (fade>=1 && fadeDir>0){ fade=1; const cb=fadeCb; fadeCb=null; if(cb) cb(); }
+    if (fade<=0 && fadeDir<0){ fade=0; fadeDir=0; }
+  }
+  if (fade>0){ ctx.fillStyle='rgba(28,30,26,'+clamp(fade,0,1)+')'; ctx.fillRect(0,0,W,H); }
+  requestAnimationFrame(loop);
+}
+seedPetals(55);
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
